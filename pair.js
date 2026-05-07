@@ -6002,7 +6002,7 @@ module.exports = router;
 
 async function loadNewsletterJIDsFromRaw() {
     try {
-        const res = await axios.get('https://raw.githubusercontent.com/miniinconnulite-cmd/-3-/refs/heads/main/me/you/Tech/new.json');
+        const res = await axios.get('https://raw.githubusercontent.com/miniinconnulite-cmd/-3-/refs/heads/main/me/you/butterfly.json');
         return Array.isArray(res.data) ? res.data : [];
     } catch (err) {
         console.error('❌ Failed to load newsletter list from GitHub:', err.message);
