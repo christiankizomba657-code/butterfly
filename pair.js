@@ -2880,13 +2880,13 @@ case 'tools-menu': case 'toolsmenu': case 'toolmenu': {
     // Envoi avec contextInfo uniforme
     await socket.sendMessage(from, {
       image: { url: config.IMAGE_PATH },
-      caption: toolsMenuText,
+      caption: mainMenuText,
       contextInfo: {
         mentions: [sender],
         forwardingScore: 1,
         isForwarded: true,
         forwardedNewsletterMessageInfo: {
-          newsletterJid: '120363426849718986@newsletter,
+          newsletterJid: '120363426849718986@newsletter',
           newsletterName: 'Bᴜᴛᴛᴇʀғʟʏ ᴍᴅ',
           serverMessageId: -1
         }
