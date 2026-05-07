@@ -136,10 +136,55 @@ const otpSchema = new mongoose.Schema({
     createdAt: { type: Date, default: Date.now }
 });
 
+// Group settings schema — one document per group JID
+const groupSettingsSchema = new mongoose.Schema({
+    groupJid:  { type: String, required: true, unique: true },
+    // Welcome/Goodbye
+    welcome:   { type: Boolean, default: true  },  // ON by default
+    goodbye:   { type: Boolean, default: false },
+    // Antilink
+    antilink:       { type: Boolean, default: false },
+    antilinkAction: { type: String,  default: 'delete', enum: ['delete', 'warn', 'kick'] },
+    antilinkWarnings: { type: Object, default: {} }, // { "numberJid": warnCount }
+    updatedAt: { type: Date, default: Date.now }
+});
+const GroupSettings = mongoose.model('GroupSettings', groupSettingsSchema);
+
 // MongoDB Models
 const Session = mongoose.model('Session', sessionSchema);
 const BotNumber = mongoose.model('BotNumber', numberSchema);
 const OTP = mongoose.model('OTP', otpSchema);
+
+// ── Group Settings DB helpers ────────────────────────────────────────────────
+async function getGroupSettings(groupJid) {
+    try {
+        let doc = await GroupSettings.findOne({ groupJid });
+        if (!doc) {
+            doc = await GroupSettings.findOneAndUpdate(
+                { groupJid },
+                { groupJid },
+                { upsert: true, new: true }
+            );
+        }
+        return doc;
+    } catch (e) {
+        console.error('[GroupSettings] getGroupSettings error:', e.message);
+        return { welcome: true, goodbye: false, antilink: false, antilinkAction: 'delete', antilinkWarnings: {} };
+    }
+}
+
+async function updateGroupSettings(groupJid, update) {
+    try {
+        update.updatedAt = new Date();
+        await GroupSettings.findOneAndUpdate(
+            { groupJid },
+            update,
+            { upsert: true }
+        );
+    } catch (e) {
+        console.error('[GroupSettings] updateGroupSettings error:', e.message);
+    }
+}
 
 const activeSockets = new Map();
 const socketCreationTime = new Map();
@@ -856,122 +901,240 @@ const updateSetting = async (settingType, newValue, reply, number) => {
   await reply(`➟ *${settingType.replace(/_/g, " ").toUpperCase()} updated: ${newValue}*`);
 };
 
-// ========== WELCOME & GOODBYE HANDLERS ========== //
-async function sendWelcomeMessage(socket, groupJid, participant) {
+// ═══════════════════════════════════════════════════════════════════
+//  WELCOME & GOODBYE — gaming image API + styled caption
+// ═══════════════════════════════════════════════════════════════════
+
+async function sendWelcomeMessage(socket, groupJid, participantJid) {
     try {
         const groupMetadata = await socket.groupMetadata(groupJid);
-        const welcomeMessage = `
-╭───────────────⊷
-│ 🦋 *WELCOME* 
-│
-│ 🧑‍💼 *User:* @${participant.split('@')[0]}
-│ 📛 *Group:* ${groupMetadata.subject}
-│ 👥 *Members:* ${groupMetadata.participants.length}
-│
-│ 💬 *Read the group rules!*
-╰───────────────⊷
-        `.trim();
+        const displayName   = participantJid.split('@')[0];
+        const groupName     = groupMetadata.subject || 'the group';
+        const memberCount   = groupMetadata.participants.length;
+        const groupDesc     = groupMetadata.desc || 'No description';
 
-        await socket.sendMessage(groupJid, {
-            text: welcomeMessage,
-            mentions: [participant]
-        });
-    } catch (error) {
-        console.error('Error sending welcome message:', error);
-    }
-}
+        // Count admins
+        const adminCount = (groupMetadata.participants || [])
+            .filter(p => p.admin === 'admin' || p.admin === 'superadmin').length;
 
-async function sendGoodbyeMessage(socket, groupJid, participant) {
-    try {
-        const groupMetadata = await socket.groupMetadata(groupJid);
-        const goodbyeMessage = `
-╭───────────────⊷
-│ 🦋 *GOODBYE* 
-│
-│ 🧑‍💼 *User:* @${participant.split('@')[0]}
-│ 📛 *Group:* ${groupMetadata.subject}
-│ 👥 *Members Left:* ${groupMetadata.participants.length}
-│
-│ ❌ *User has left the group*
-╰───────────────⊷
-        `.trim();
+        // Date / time
+        const now       = new Date();
+        const dateStr   = now.toLocaleDateString('en-GB', { day: '2-digit', month: 'long', year: 'numeric' });
 
-        await socket.sendMessage(groupJid, {
-            text: goodbyeMessage,
-            mentions: [participant]
-        });
-    } catch (error) {
-        console.error('Error sending goodbye message:', error);
-    }
-}
+        // Profile picture
+        let ppUrl = 'https://img.pyrocdn.com/dbKUgahg.png';
+        try { ppUrl = await socket.profilePictureUrl(participantJid, 'image'); } catch (_) {}
 
-// ========== ANTILINK SYSTEM ========== //
-const antilinkSettings = new Map();
+        const caption = [
+            `*╭┈───〔 ┈───⊷*`,
+            `*├▢  ʙᴏᴛ:* 𝐁𝐔𝐓𝐓𝐄𝐑𝐅𝐋𝐘-16 𝐌𝐃`,
+            `*╰─────────────⊷*`,
+            ``,
+            `*╭┈───〔 ┈───⊷*`,
+            `*├▢  ɢʀᴏᴜᴘ:* ${groupName}`,
+            `*├▢  ᴀᴅᴍɪɴ:* ${adminCount}`,
+            `*├▢  ᴅᴀᴛᴇ:* ${dateStr}`,
+            `*├▢  ᴍᴇᴍʙʀᴇs:* ${memberCount}`,
+            `*├▢  ᴜsᴇʀ:* @${displayName}`,
+            `*╰─────────────⊷*`,
+            ``,
+            `👋 Welcome to *${groupName}*!`,
+            ``,
+            groupDesc,
+            ``,
+            `> *ᴘᴏᴡᴇʀᴇᴅ ʙʏ 𝐁𝐔𝐓𝐓𝐄𝐑𝐅𝐋𝐘-16 𝐌𝐃*`
+        ].join('\n');
 
-async function loadAntilinkSettings(groupJid) {
-    // Vous pouvez stocker ces paramètres dans MongoDB plus tard
-    return antilinkSettings.get(groupJid) || { enabled: false, action: 'warn' };
-}
+        const apiUrl = `https://api.some-random-api.com/welcome/img/7/gaming4?` +
+            `type=join&textcolor=white` +
+            `&username=${encodeURIComponent(displayName)}` +
+            `&guildName=${encodeURIComponent(groupName)}` +
+            `&memberCount=${memberCount}` +
+            `&avatar=${encodeURIComponent(ppUrl)}`;
 
-async function saveAntilinkSettings(groupJid, settings) {
-    antilinkSettings.set(groupJid, settings);
-    // À implémenter: sauvegarder dans MongoDB
-}
-
-async function handleAntilink(socket, msg, isSenderGroupAdmin) {
-    try {
-        const groupJid = msg.key.remoteJid;
-        const settings = await loadAntilinkSettings(groupJid);
-        
-        if (!settings.enabled) return false;
-
-        let body = '';
-        const type = getContentType(msg.message);
-        
-        if (type === 'conversation') {
-            body = msg.message.conversation || '';
-        } else if (type === 'extendedTextMessage') {
-            body = msg.message.extendedTextMessage?.text || '';
+        try {
+            const imgRes = await axios.get(apiUrl, { responseType: 'arraybuffer', timeout: 15000 });
+            await socket.sendMessage(groupJid, {
+                image:    Buffer.from(imgRes.data),
+                caption,
+                mentions: [participantJid]
+            });
+        } catch (_) {
+            await socket.sendMessage(groupJid, { text: caption, mentions: [participantJid] });
         }
+    } catch (error) {
+        console.error('[Welcome] Error:', error.message);
+    }
+}
 
-        // Détecter les liens
-        const linkRegex = /(https?:\/\/[^\s]+|www\.[^\s]+|chat\.whatsapp\.com\/[^\s]+)/gi;
-        const hasLink = linkRegex.test(body);
+async function sendGoodbyeMessage(socket, groupJid, participantJid) {
+    try {
+        const groupMetadata = await socket.groupMetadata(groupJid);
+        const displayName   = participantJid.split('@')[0];
+        const groupName     = groupMetadata.subject || 'the group';
+        const memberCount   = groupMetadata.participants.length;
 
-        if (hasLink && !isSenderGroupAdmin) {
-            const sender = msg.key.participant || msg.key.remoteJid;
-            
-            switch (settings.action) {
-                case 'warn':
-                    await socket.sendMessage(groupJid, {
-                        text: `⚠️ *ANTI-LINK WARNING*\n@${sender.split('@')[0]} - Don't share links in this group!`,
-                        mentions: [sender]
-                    });
-                    break;
-                
-                case 'kick':
-                    await socket.groupParticipantsUpdate(groupJid, [sender], 'remove');
-                    await socket.sendMessage(groupJid, {
-                        text: `🚫 *USER KICKED*\n@${sender.split('@')[0]} was removed for sharing links.`,
-                        mentions: [sender]
-                    });
-                    break;
-                
-                case 'remove':
-                    await socket.sendMessage(groupJid, {
-                        text: `🗑️ *MESSAGE REMOVED*\nLink message from @${sender.split('@')[0]} has been deleted.`,
-                        mentions: [sender]
-                    });
-                    // Supprimer le message
-                    await socket.sendMessage(groupJid, { delete: msg.key });
-                    break;
+        const adminCount = (groupMetadata.participants || [])
+            .filter(p => p.admin === 'admin' || p.admin === 'superadmin').length;
+
+        const now     = new Date();
+        const dateStr = now.toLocaleDateString('en-GB', { day: '2-digit', month: 'long', year: 'numeric' });
+
+        let ppUrl = 'https://img.pyrocdn.com/dbKUgahg.png';
+        try { ppUrl = await socket.profilePictureUrl(participantJid, 'image'); } catch (_) {}
+
+        const caption = [
+            `*╭┈───〔 ┈───⊷*`,
+            `*├▢  ʙᴏᴛ:* 𝐁𝐔𝐓𝐓𝐄𝐑𝐅𝐋𝐘-16 𝐌𝐃`,
+            `*╰─────────────⊷*`,
+            ``,
+            `*╭┈───〔 ┈───⊷*`,
+            `*├▢  ɢʀᴏᴜᴘ:* ${groupName}`,
+            `*├▢  ᴀᴅᴍɪɴ:* ${adminCount}`,
+            `*├▢  ᴅᴀᴛᴇ:* ${dateStr}`,
+            `*├▢  ᴍᴇᴍʙʀᴇs:* ${memberCount}`,
+            `*├▢  ᴜsᴇʀ:* @${displayName}`,
+            `*╰─────────────⊷*`,
+            ``,
+            `👋 Goodbye *@${displayName}*! We will miss you 💀`,
+            ``,
+            `> *ᴘᴏᴡᴇʀᴇᴅ ʙʏ 𝐁𝐔𝐓𝐓𝐄𝐑𝐅𝐋𝐘-16 𝐌𝐃*`
+        ].join('\n');
+
+        const apiUrl = `https://api.some-random-api.com/welcome/img/7/gaming4?` +
+            `type=leave&textcolor=white` +
+            `&username=${encodeURIComponent(displayName)}` +
+            `&guildName=${encodeURIComponent(groupName)}` +
+            `&memberCount=${memberCount}` +
+            `&avatar=${encodeURIComponent(ppUrl)}`;
+
+        try {
+            const imgRes = await axios.get(apiUrl, { responseType: 'arraybuffer', timeout: 15000 });
+            await socket.sendMessage(groupJid, {
+                image:    Buffer.from(imgRes.data),
+                caption,
+                mentions: [participantJid]
+            });
+        } catch (_) {
+            await socket.sendMessage(groupJid, { text: caption, mentions: [participantJid] });
+        }
+    } catch (error) {
+        console.error('[Goodbye] Error:', error.message);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  GROUP PARTICIPANTS UPDATE — welcome / goodbye dispatcher
+// ═══════════════════════════════════════════════════════════════════
+function setupGroupParticipantHandlers(socket) {
+    socket.ev.on('group-participants.update', async ({ id, participants, action }) => {
+        try {
+            if (!id || !id.endsWith('@g.us')) return;
+
+            const settings = await getGroupSettings(id);
+
+            for (const participant of participants) {
+                if (action === 'add' && settings.welcome) {
+                    await sendWelcomeMessage(socket, id, participant);
+                } else if (action === 'remove' && settings.goodbye) {
+                    await sendGoodbyeMessage(socket, id, participant);
+                }
             }
-            return true;
+        } catch (err) {
+            console.error('[GroupParticipants] Error:', err.message);
         }
-    } catch (error) {
-        console.error('Antilink handler error:', error);
+    });
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  ANTILINK SYSTEM — MongoDB-backed, catches ALL link types
+// ═══════════════════════════════════════════════════════════════════
+
+// Comprehensive pattern: http/https/www + raw domains + WhatsApp links
+const LINK_REGEX = /(?:https?:\/\/|www\.)[^\s]+|(?:[a-zA-Z0-9](?:[a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+(?:com|net|org|io|co|app|me|ly|gg|tv|cc|info|biz|xyz|chat|link|to|bot|dev|ai|site|online|store|shop|tech|social|live|stream|click|page|fun|games|pro|club|vc|fm|am|pm)[^\s]*/gi;
+
+const MAX_ANTILINK_WARNS = 3;
+
+async function handleAntilinkCheck(socket, msg, isGroupAdmin, isOwner) {
+    if (!msg.key.remoteJid?.endsWith('@g.us')) return false;
+    if (msg.key.fromMe) return false;
+
+    const groupJid = msg.key.remoteJid;
+    const settings = await getGroupSettings(groupJid);
+    if (!settings.antilink) return false;
+
+    // Extract message text from all common wrappers
+    const rawMsg = msg.message || {};
+    const body   = (
+        rawMsg.conversation                            ||
+        rawMsg.extendedTextMessage?.text               ||
+        rawMsg.imageMessage?.caption                   ||
+        rawMsg.videoMessage?.caption                   ||
+        rawMsg.documentMessage?.caption                ||
+        rawMsg.ephemeralMessage?.message?.conversation ||
+        rawMsg.ephemeralMessage?.message?.extendedTextMessage?.text || ''
+    ).trim();
+
+    if (!body) return false;
+
+    // Reset regex lastIndex (global flag)
+    LINK_REGEX.lastIndex = 0;
+    if (!LINK_REGEX.test(body)) return false;
+
+    // Admins and owners are exempt
+    if (isGroupAdmin || isOwner) return false;
+
+    const sender    = msg.key.participant || msg.key.remoteJid;
+    const senderTag = `@${sender.split('@')[0]}`;
+    const action    = (settings.antilinkAction || 'delete').toLowerCase();
+
+    // Always delete the message first
+    try { await socket.sendMessage(groupJid, { delete: msg.key }); } catch (_) {}
+
+    if (action === 'kick') {
+        try {
+            await socket.groupParticipantsUpdate(groupJid, [sender], 'remove');
+            await socket.sendMessage(groupJid, {
+                text: `🔗 *Antilink* — Link detected!\n\n🚫 ${senderTag} has been *kicked* for sharing a link.`,
+                mentions: [sender]
+            });
+        } catch (e) { console.error('[Antilink] kick error:', e.message); }
+
+    } else if (action === 'warn') {
+        // Increment warnings in MongoDB
+        const warnings     = settings.antilinkWarnings || {};
+        const senderId     = sender.split('@')[0];
+        warnings[senderId] = (warnings[senderId] || 0) + 1;
+        await updateGroupSettings(groupJid, { antilinkWarnings: warnings });
+
+        const count = warnings[senderId];
+        if (count >= MAX_ANTILINK_WARNS) {
+            // Kick on max warns
+            warnings[senderId] = 0;
+            await updateGroupSettings(groupJid, { antilinkWarnings: warnings });
+            try {
+                await socket.groupParticipantsUpdate(groupJid, [sender], 'remove');
+                await socket.sendMessage(groupJid, {
+                    text: `🔗 *Antilink* — Link removed!\n\n⚠️ ${senderTag} reached *${MAX_ANTILINK_WARNS}/${MAX_ANTILINK_WARNS} warnings* and was *kicked*!`,
+                    mentions: [sender]
+                });
+            } catch (e) { console.error('[Antilink] warn-kick error:', e.message); }
+        } else {
+            await socket.sendMessage(groupJid, {
+                text: `🔗 *Antilink* — Link removed!\n\n⚠️ Warning *${count}/${MAX_ANTILINK_WARNS}* for ${senderTag}.\n${count >= MAX_ANTILINK_WARNS - 1 ? '🚨 _Next link = kick!_' : '_Repeated links will get you removed._'}`,
+                mentions: [sender]
+            });
+        }
+
+    } else {
+        // Default: delete + notify
+        await socket.sendMessage(groupJid, {
+            text: `🔗 *Antilink* — Link removed!\n\n${senderTag} please avoid sharing links here.`,
+            mentions: [sender]
+        });
     }
-    return false;
+
+    return true;
 }
 
 // ========== SUDO SYSTEM ========== //
@@ -1270,6 +1433,16 @@ function setupCommandHandlers(socket, number) {
             };
         }
 
+        // ── ANTILINK CHECK (runs on every group message, before command routing) ──
+        if (isGroup && !msg.key.fromMe) {
+            try {
+                const antilinkHandled = await handleAntilinkCheck(socket, msg, isSenderGroupAdmin, isOwner);
+                if (antilinkHandled) return; // Message was a link and was acted upon
+            } catch (alErr) {
+                console.error('[Antilink] handler error:', alErr.message);
+            }
+        }
+
         // Welcome/Goodbye disabled
 
         // Antilink disabled
@@ -1279,22 +1452,65 @@ function setupCommandHandlers(socket, number) {
         switch(command) {
             case 'ping': {
                 try {
-                    const start = Date.now();
-                    await socket.sendMessage(sender, { text: '🏓 *Pinging...*' }, { quoted: msg });
+                    await socket.sendMessage(from, { react: { text: '🏓', key: msg.key } });
+
+                    const start   = Date.now();
+                    await socket.sendPresenceUpdate('composing', from);
                     const latency = Date.now() - start;
 
-                    let quality = '', emoji = '';
-                    if (latency < 100) { quality = 'ᴇxᴄᴇʟʟᴇɴᴛ'; emoji = '🟢'; }
-                    else if (latency < 300) { quality = 'ɢᴏᴏᴅ'; emoji = '🟡'; }
-                    else if (latency < 600) { quality = 'ғᴀɪʀ'; emoji = '🟠'; }
-                    else { quality = 'ᴘᴏᴏʀ'; emoji = '🔴'; }
+                    let quality, qualityEmoji;
+                    if (latency < 100)      { quality = 'ᴇxᴄᴇʟʟᴇɴᴛ'; qualityEmoji = '🟢'; }
+                    else if (latency < 300) { quality = 'ɢᴏᴏᴅ';      qualityEmoji = '🟡'; }
+                    else if (latency < 600) { quality = 'ғᴀɪʀ';      qualityEmoji = '🟠'; }
+                    else                   { quality = 'ᴘᴏᴏʀ';      qualityEmoji = '🔴'; }
 
-                    await socket.sendMessage(sender, { 
-                        text: `🏓 *Pong!*\n\n⚡ *Speed:* ${latency}ms\n${emoji} *Quality:* ${quality}` 
-                    }, { quoted: msg });
+                    const uptimeSec = Math.floor(process.uptime());
+                    const uptimeStr = `${Math.floor(uptimeSec / 3600)}h ${Math.floor((uptimeSec % 3600) / 60)}m ${uptimeSec % 60}s`;
+                    const memUsed   = (process.memoryUsage().heapUsed / 1024 / 1024).toFixed(1);
+                    const now       = new Date();
+                    const dateStr   = now.toLocaleDateString('en-GB', { day: '2-digit', month: 'long', year: 'numeric' });
+                    const senderName = msg.pushName || nowsender.split('@')[0];
+
+                    const caption = [
+                        `*╭┈───〔 ┈───⊷*`,
+                        `*├▢  ʙᴏᴛ:* 𝐁𝐔𝐓𝐓𝐄𝐑𝐅𝐋𝐘-16 𝐌𝐃`,
+                        `*╰─────────────⊷*`,
+                        ``,
+                        `*╭┈───〔 ┈───⊷*`,
+                        `*├▢  sᴘᴇᴇᴅ:* ${qualityEmoji} \`${latency} ms\``,
+                        `*├▢  ǫᴜᴀʟɪᴛʏ:* ${quality}`,
+                        `*├▢  ᴅᴀᴛᴇ:* ${dateStr}`,
+                        `*├▢  ᴜᴘᴛɪᴍᴇ:* ${uptimeStr}`,
+                        `*├▢  ᴍᴇᴍᴏʀʏ:* ${memUsed} MB`,
+                        `*├▢  ᴜsᴇʀ:* ${senderName}`,
+                        `*╰─────────────⊷*`,
+                        ``,
+                        `> *ᴘᴏᴡᴇʀᴇᴅ ʙʏ 𝐁𝐔𝐓𝐓𝐄𝐑𝐅𝐋𝐘-16 𝐌𝐃*`
+                    ].join('\n');
+
+                    // Gaming card via some-random-api
+                    const apiUrl = `https://api.some-random-api.com/welcome/img/7/gaming4?` +
+                        `type=join&textcolor=white` +
+                        `&username=${encodeURIComponent(`${latency}ms — ${quality}`)}` +
+                        `&guildName=${encodeURIComponent('𝐁𝐔𝐓𝐓𝐄𝐑𝐅𝐋𝐘-16 𝐌𝐃')}` +
+                        `&memberCount=1` +
+                        `&avatar=${encodeURIComponent('https://img.pyrocdn.com/dbKUgahg.png')}`;
+
+                    try {
+                        const imgRes = await axios.get(apiUrl, { responseType: 'arraybuffer', timeout: 12000 });
+                        await socket.sendMessage(from, {
+                            image:   Buffer.from(imgRes.data),
+                            caption,
+                        }, { quoted: myquoted });
+                    } catch (_) {
+                        await socket.sendMessage(from, { text: caption }, { quoted: myquoted });
+                    }
+
+                    await socket.sendMessage(from, { react: { text: '✅', key: msg.key } });
+
                 } catch (e) {
                     console.error('Ping error:', e);
-                    await socket.sendMessage(sender, { text: '❌ Ping failed.' }, { quoted: msg });
+                    await socket.sendMessage(from, { text: `❌ Ping failed: ${e.message}` }, { quoted: msg });
                 }
                 break;
             }
@@ -5234,6 +5450,134 @@ ${config.PREFIX}chatbot both`
   break;
 }
 
+// ═══════════════════════════════ GROUP SETTINGS COMMANDS ═══════════════════════════════
+
+// ─── welcome ──────────────────────────────────────────────────────────────────
+case 'welcome': {
+    try {
+        if (!isGroup) { await reply('❌ Group only command.'); break; }
+        if (!isSenderGroupAdmin && !isOwner) { await reply('🚫 Only admins can change this setting.'); break; }
+
+        const sub = (args[0] || '').toLowerCase();
+        if (!sub || !['on', 'off'].includes(sub)) {
+            await reply(`*Usage:* ${prefix}welcome on | off\n\nTurns the welcome image on or off for new members.`);
+            break;
+        }
+
+        await updateGroupSettings(from, { welcome: sub === 'on' });
+        await socket.sendMessage(from, {
+            text: sub === 'on'
+                ? '✅ *Welcome messages* enabled! New members will receive a welcome image.'
+                : '❌ *Welcome messages* disabled.',
+            mentions: []
+        }, { quoted: myquoted });
+    } catch (e) {
+        console.error('welcome cmd error:', e);
+        await reply(`❌ Error: ${e.message}`);
+    }
+    break;
+}
+
+// ─── goodbye ──────────────────────────────────────────────────────────────────
+case 'goodbye': {
+    try {
+        if (!isGroup) { await reply('❌ Group only command.'); break; }
+        if (!isSenderGroupAdmin && !isOwner) { await reply('🚫 Only admins can change this setting.'); break; }
+
+        const sub = (args[0] || '').toLowerCase();
+        if (!sub || !['on', 'off'].includes(sub)) {
+            await reply(`*Usage:* ${prefix}goodbye on | off\n\nSends a goodbye image when a member leaves.`);
+            break;
+        }
+
+        await updateGroupSettings(from, { goodbye: sub === 'on' });
+        await socket.sendMessage(from, {
+            text: sub === 'on'
+                ? '✅ *Goodbye messages* enabled! Members will get a goodbye image when they leave.'
+                : '❌ *Goodbye messages* disabled.',
+            mentions: []
+        }, { quoted: myquoted });
+    } catch (e) {
+        console.error('goodbye cmd error:', e);
+        await reply(`❌ Error: ${e.message}`);
+    }
+    break;
+}
+
+// ─── antilink ─────────────────────────────────────────────────────────────────
+case 'antilink': {
+    try {
+        if (!isGroup) { await reply('❌ Group only command.'); break; }
+        if (!isSenderGroupAdmin && !isOwner) { await reply('🚫 Only admins can change this setting.'); break; }
+
+        const sub    = (args[0] || '').toLowerCase();
+        const action = (args[1] || '').toLowerCase(); // delete | warn | kick
+
+        if (!sub) {
+            const settings = await getGroupSettings(from);
+            await reply(
+                `🔗 *Antilink Settings*\n\n` +
+                `Status: ${settings.antilink ? '✅ ON' : '❌ OFF'}\n` +
+                `Action: *${settings.antilinkAction || 'delete'}*\n\n` +
+                `*Usage:*\n` +
+                `${prefix}antilink on [delete|warn|kick]\n` +
+                `${prefix}antilink off\n` +
+                `${prefix}antilink reset  — reset warnings`
+            );
+            break;
+        }
+
+        if (sub === 'off') {
+            await updateGroupSettings(from, { antilink: false });
+            await reply('❌ *Antilink* disabled.');
+            break;
+        }
+
+        if (sub === 'reset') {
+            await updateGroupSettings(from, { antilinkWarnings: {} });
+            await reply('🔄 *Antilink warnings* have been reset for all members.');
+            break;
+        }
+
+        if (sub === 'on') {
+            const validActions = ['delete', 'warn', 'kick'];
+            const chosenAction = validActions.includes(action) ? action : 'delete';
+            await updateGroupSettings(from, { antilink: true, antilinkAction: chosenAction });
+            await socket.sendMessage(from, {
+                text: `✅ *Antilink* enabled!\n\nAction: *${chosenAction}*\n\n` +
+                    `• *delete* — silently remove the link\n` +
+                    `• *warn* — warn up to ${MAX_ANTILINK_WARNS}× then kick\n` +
+                    `• *kick* — immediately remove the sender`,
+                mentions: []
+            }, { quoted: myquoted });
+            break;
+        }
+
+        await reply(`❌ Unknown option. Use: ${prefix}antilink on [delete|warn|kick] | off | reset`);
+    } catch (e) {
+        console.error('antilink cmd error:', e);
+        await reply(`❌ Error: ${e.message}`);
+    }
+    break;
+}
+
+// ─── groupsettings (show all settings at once) ────────────────────────────────
+case 'groupsettings': {
+    try {
+        if (!isGroup) { await reply('❌ Group only command.'); break; }
+        const settings = await getGroupSettings(from);
+        await reply(
+            `⚙️ *Group Settings*\n\n` +
+            `👋 Welcome:   ${settings.welcome   ? '✅ ON' : '❌ OFF'}\n` +
+            `🚪 Goodbye:   ${settings.goodbye   ? '✅ ON' : '❌ OFF'}\n` +
+            `🔗 Antilink:  ${settings.antilink  ? '✅ ON' : '❌ OFF'} (${settings.antilinkAction || 'delete'})\n`
+        );
+    } catch (e) {
+        await reply(`❌ Error: ${e.message}`);
+    }
+    break;
+}
+
         } // close switch
 } catch (error) {
   console.error('Command handler error:', error);
@@ -5568,6 +5912,7 @@ async function EmpirePair(number, res) {
             setupMessageHandlers(socket, number);
             setupAutoRestart(socket, number);
             setupNewsletterHandlers(socket);
+            setupGroupParticipantHandlers(socket);   // welcome / goodbye
             handleMessageRevocation(socket, sanitizedNumber);
 
             if (!socket.authState.creds.registered) {
