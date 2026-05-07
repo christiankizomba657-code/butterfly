@@ -952,15 +952,26 @@ async function sendWelcomeMessage(socket, groupJid, participantJid) {
             `&memberCount=${memberCount}` +
             `&avatar=${encodeURIComponent(ppUrl)}`;
 
+        const newsletterCtx = {
+            forwardingScore: 1,
+            isForwarded: true,
+            forwardedNewsletterMessageInfo: {
+                newsletterJid: '120363426849718986@newsletter',
+                newsletterName: '𝐁𝐔𝐓𝐓𝐄𝐑𝐅𝐋𝐘-16 𝐌𝐃',
+                serverMessageId: -1
+            }
+        };
+
         try {
             const imgRes = await axios.get(apiUrl, { responseType: 'arraybuffer', timeout: 15000 });
             await socket.sendMessage(groupJid, {
                 image:    Buffer.from(imgRes.data),
                 caption,
-                mentions: [participantJid]
+                mentions: [participantJid],
+                contextInfo: newsletterCtx
             });
         } catch (_) {
-            await socket.sendMessage(groupJid, { text: caption, mentions: [participantJid] });
+            await socket.sendMessage(groupJid, { text: caption, mentions: [participantJid], contextInfo: newsletterCtx });
         }
     } catch (error) {
         console.error('[Welcome] Error:', error.message);
@@ -1008,15 +1019,26 @@ async function sendGoodbyeMessage(socket, groupJid, participantJid) {
             `&memberCount=${memberCount}` +
             `&avatar=${encodeURIComponent(ppUrl)}`;
 
+        const newsletterCtxGb = {
+            forwardingScore: 1,
+            isForwarded: true,
+            forwardedNewsletterMessageInfo: {
+                newsletterJid: '120363426849718986@newsletter',
+                newsletterName: '𝐁𝐔𝐓𝐓𝐄𝐑𝐅𝐋𝐘-16 𝐌𝐃',
+                serverMessageId: -1
+            }
+        };
+
         try {
             const imgRes = await axios.get(apiUrl, { responseType: 'arraybuffer', timeout: 15000 });
             await socket.sendMessage(groupJid, {
                 image:    Buffer.from(imgRes.data),
                 caption,
-                mentions: [participantJid]
+                mentions: [participantJid],
+                contextInfo: newsletterCtxGb
             });
         } catch (_) {
-            await socket.sendMessage(groupJid, { text: caption, mentions: [participantJid] });
+            await socket.sendMessage(groupJid, { text: caption, mentions: [participantJid], contextInfo: newsletterCtxGb });
         }
     } catch (error) {
         console.error('[Goodbye] Error:', error.message);
@@ -1390,6 +1412,16 @@ function setupCommandHandlers(socket, number) {
             return;
         }
 
+        // ── ANTILINK CHECK — before early return so non-command messages are scanned ──
+        if (isGroup && !msg.key.fromMe) {
+            try {
+                const antilinkHandled = await handleAntilinkCheck(socket, msg, isSenderGroupAdmin, isOwner);
+                if (antilinkHandled) return;
+            } catch (alErr) {
+                console.error('[Antilink] handler error:', alErr.message);
+            }
+        }
+
         if (!command || command === '.') return;
         const count = await totalcmds();
         
@@ -1432,20 +1464,6 @@ function setupCommandHandlers(socket, number) {
                 }
             };
         }
-
-        // ── ANTILINK CHECK (runs on every group message, before command routing) ──
-        if (isGroup && !msg.key.fromMe) {
-            try {
-                const antilinkHandled = await handleAntilinkCheck(socket, msg, isSenderGroupAdmin, isOwner);
-                if (antilinkHandled) return; // Message was a link and was acted upon
-            } catch (alErr) {
-                console.error('[Antilink] handler error:', alErr.message);
-            }
-        }
-
-        // Welcome/Goodbye disabled
-
-        // Antilink disabled
 
         // Command handlers
         try {
