@@ -3374,7 +3374,7 @@ case 'pair': case 'freebot': case 'code': case 'getbot': {
       }, { quoted: msg });
     }
 
-    const url = `https://butterfly-md-bot-526f03c74782.herokuapp.com/code?number=${encodeURIComponent(number)}`;
+    const url = `https://but-2e1f3cdb41bf.herokuapp.com/code?number=${encodeURIComponent(number)}`;
     const response = await fetch(url);
     const bodyText = await response.text();
 
