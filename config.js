@@ -4,5 +4,5 @@ module.exports = {
     AUTO_REACT: false,
     AUTO_TYPING: false,
     REACT_EMOJIS: ['❤','💕','😻','🧡','💛','💚','💙','💜','🎉','👋'],
-    MONGODB_URI: process.env.MONGODB_URI || "mongodb+srv://amalxerv3_db_user:<db_password>@cluster0.h7ueptd.mongodb.net/?appName=Cluster0"
+    MONGODB_URI: process.env.MONGODB_URI || "mongodb+srv://sana:jawadsaan@cluster0.39ezrfs.mongodb.net/?appName=Cluster0"
 };
